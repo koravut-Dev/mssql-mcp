@@ -1,0 +1,28 @@
+{
+  "name": "mssql-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for connecting AI assistants to Microsoft SQL Server (read-only by default)",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": { "mssql-mcp": "dist/index.js" },
+  "files": ["dist", "README.md", "LICENSE", ".env.example"],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": ["mcp", "model-context-protocol", "sql-server", "mssql", "claude"],
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "mssql": "^11.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/mssql": "^9.1.5",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
