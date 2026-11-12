@@ -20,7 +20,8 @@
 
 - 🔒 **Read-only โดยค่าเริ่มต้น** อนุญาตเฉพาะ `SELECT` ปลอดภัยต่อข้อมูล
 - ⚡ **ติดตั้งบรรทัดเดียว** ผ่าน `npx` ไม่ต้อง clone เอง
-- 🧰 **4 เครื่องมือพร้อมใช้** ดูฐานข้อมูล ตาราง โครงสร้างคอลัมน์ และรัน query
+- 🌐 **รองรับหลาย environment** ตั้ง dev / uat / prod ในเซิร์ฟเวอร์เดียว และกำหนด read-only แยกรายตัวได้
+- 🧰 **5 เครื่องมือพร้อมใช้** ดูรายการ connection ฐานข้อมูล ตาราง โครงสร้างคอลัมน์ และรัน query
 - 🛡️ **จำกัดจำนวนแถว** ป้องกันผลลัพธ์ใหญ่เกินไป (ค่าเริ่มต้น 500 แถว)
 - 🔌 ใช้ได้กับ **Claude Desktop, Claude Code** และ MCP client อื่น ๆ
 
@@ -28,6 +29,7 @@
 
 | Tool | หน้าที่ |
 |---|---|
+| `list_connections` | แสดงรายการ connection/environment ที่ตั้งไว้ (ไม่แสดงรหัสผ่าน) |
 | `list_databases` | แสดงรายชื่อฐานข้อมูลบนเซิร์ฟเวอร์ |
 | `list_tables` | แสดงตารางและ view (กรองตาม schema ได้) |
 | `describe_table` | แสดงคอลัมน์ ชนิดข้อมูล nullable และ primary key |
@@ -52,6 +54,8 @@ git clone https://github.com/koravut-Dev/mssql-mcp.git
 cd mssql-mcp
 npm install      # build อัตโนมัติผ่าน prepare script
 ```
+
+> ทุก tool (ยกเว้น `list_connections`) รับพารามิเตอร์ `connection` เพิ่มเติม เช่น "ดูตารางใน uat" ถ้าไม่ระบุจะใช้ connection ค่าเริ่มต้น
 
 ## 🔧 ตั้งค่า MCP Client
 
@@ -97,7 +101,47 @@ claude mcp add mssql \
 
 ใช้ `"command": "node"` และ `"args": ["C:/path/to/mssql-mcp/dist/index.js"]` แทน `npx`
 
-## ⚙️ ตัวแปรสภาพแวดล้อม (Environment Variables)
+## 🌐 หลาย Environment (dev / uat / prod)
+
+สร้างไฟล์ config แล้วชี้ด้วย `MSSQL_CONFIG` (คัดลอกจาก [`mssql-mcp.config.example.json`](mssql-mcp.config.example.json))
+
+```json
+{
+  "default": "dev",
+  "connections": {
+    "dev":  { "server": "dev-sql.example.com",  "database": "MyApp", "user": "dev_user",
+              "password": "${MSSQL_DEV_PASSWORD}", "readonly": false },
+    "prod": { "server": "prod-sql.example.com", "database": "MyApp", "user": "prod_reader",
+              "password": "${MSSQL_PROD_PASSWORD}", "readonly": true, "maxRows": 200 }
+  }
+}
+```
+
+ตั้งค่าใน MCP client:
+
+```json
+{
+  "mcpServers": {
+    "mssql": {
+      "command": "npx",
+      "args": ["-y", "github:koravut-Dev/mssql-mcp"],
+      "env": {
+        "MSSQL_CONFIG": "C:/secrets/mssql-mcp.config.json",
+        "MSSQL_DEV_PASSWORD": "...",
+        "MSSQL_PROD_PASSWORD": "..."
+      }
+    }
+  }
+}
+```
+
+- 🔑 ใช้ `${ENV_VAR}` ในค่าใดก็ได้ เพื่อเก็บรหัสผ่านไว้นอกไฟล์ config
+- 🔒 `readonly` ตั้งแยกได้ทีละ connection (ค่าเริ่มต้น `true`) แนะนำให้ prod เป็น read-only เสมอ
+- field ที่ใช้ได้ในแต่ละ connection: `server`, `port`, `instance`, `database`, `user`, `password`, `encrypt`, `trustServerCertificate`, `readonly`, `maxRows`, `requestTimeout`, `description`
+- ไฟล์ `mssql-mcp.config.json` อยู่ใน `.gitignore` แล้ว อย่า commit ขึ้น Git
+- ถ้าไม่ตั้ง `MSSQL_CONFIG` จะใช้โหมด connection เดียวจากตัวแปรด้านล่าง (ชื่อ `default`)
+
+## ⚙️ ตัวแปรสภาพแวดล้อม (โหมด connection เดียว)
 
 | ตัวแปร | ค่าเริ่มต้น | คำอธิบาย |
 |---|---|---|
@@ -132,7 +176,8 @@ ALTER ROLE db_datareader ADD MEMBER mcp_reader;
 
 เมื่อเชื่อมต่อแล้ว ลองถาม AI ว่า:
 
-- "มีตารางอะไรในฐานข้อมูลนี้บ้าง"
+- "มี environment อะไรให้เชื่อมต่อบ้าง"
+- "มีตารางอะไรในฐานข้อมูล uat บ้าง"
 - "ตาราง Orders มีคอลัมน์อะไรบ้าง"
 - "ยอดขายรวมแต่ละเดือนของปีนี้เป็นเท่าไร"
 - "ลูกค้า 10 อันดับแรกที่สั่งซื้อมากที่สุดคือใคร"

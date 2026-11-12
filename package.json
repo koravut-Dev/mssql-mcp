@@ -1,11 +1,11 @@
 {
   "name": "mssql-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server for connecting AI assistants to Microsoft SQL Server (read-only by default)",
   "type": "module",
   "main": "dist/index.js",
   "bin": { "mssql-mcp": "dist/index.js" },
-  "files": ["dist", "README.md", "LICENSE", ".env.example"],
+  "files": ["dist", "README.md", "LICENSE", ".env.example", "mssql-mcp.config.example.json"],
   "scripts": {
     "build": "tsc",
     "prepare": "npm run build",

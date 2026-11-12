@@ -2,35 +2,124 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import sql from "mssql";
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 
+// ---------- Configuration ----------
+
+interface ConnectionSettings {
+  server?: string;
+  port?: number | string;
+  instance?: string;
+  database?: string;
+  user?: string;
+  password?: string;
+  encrypt?: boolean | string;
+  trustServerCertificate?: boolean | string;
+  readonly?: boolean | string;
+  maxRows?: number | string;
+  requestTimeout?: number | string;
+  description?: string;
+}
+
+interface Resolved {
+  name: string;
+  description?: string;
+  readonly: boolean;
+  maxRows: number;
+  config: sql.config;
+}
+
 const env = process.env;
-const READONLY = (env.MSSQL_READONLY ?? "true").toLowerCase() !== "false";
-const MAX_ROWS = Number(env.MSSQL_MAX_ROWS ?? 500);
+const bool = (v: unknown, def: boolean) =>
+  v === undefined || v === "" ? def : String(v).toLowerCase() !== "false";
 
-const config: sql.config = {
-  server: env.MSSQL_SERVER ?? "localhost",
-  port: Number(env.MSSQL_PORT ?? 1433),
-  database: env.MSSQL_DATABASE,
-  user: env.MSSQL_USER,
-  password: env.MSSQL_PASSWORD,
-  options: {
-    encrypt: (env.MSSQL_ENCRYPT ?? "true").toLowerCase() !== "false",
-    trustServerCertificate:
-      (env.MSSQL_TRUST_SERVER_CERTIFICATE ?? "false").toLowerCase() === "true",
-    ...(env.MSSQL_INSTANCE ? { instanceName: env.MSSQL_INSTANCE } : {}),
-  },
-  pool: { max: 5, min: 0, idleTimeoutMillis: 30000 },
-  requestTimeout: Number(env.MSSQL_REQUEST_TIMEOUT ?? 30000),
-};
+/** Replace ${VAR} with process.env.VAR so secrets can stay out of the config file. */
+function interpolate(v: unknown): unknown {
+  if (typeof v !== "string") return v;
+  return v.replace(/\$\{(\w+)\}/g, (_, k) => env[k] ?? "");
+}
 
-let pool: sql.ConnectionPool | undefined;
-async function getPool(): Promise<sql.ConnectionPool> {
-  if (!pool || !pool.connected) {
-    pool = await new sql.ConnectionPool(config).connect();
+function resolve(name: string, raw: ConnectionSettings): Resolved {
+  const s: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) s[k] = interpolate(v);
+  const c = s as ConnectionSettings;
+  return {
+    name,
+    description: c.description,
+    readonly: bool(c.readonly, true),
+    maxRows: Number(c.maxRows ?? 500),
+    config: {
+      server: c.server ?? "localhost",
+      port: Number(c.port ?? 1433),
+      database: c.database || undefined,
+      user: c.user || undefined,
+      password: c.password || undefined,
+      options: {
+        encrypt: bool(c.encrypt, true),
+        trustServerCertificate: c.trustServerCertificate !== undefined && String(c.trustServerCertificate).toLowerCase() === "true",
+        ...(c.instance ? { instanceName: c.instance } : {}),
+      },
+      pool: { max: 5, min: 0, idleTimeoutMillis: 30000 },
+      requestTimeout: Number(c.requestTimeout ?? 30000),
+    },
+  };
+}
+
+function loadConnections(): { map: Map<string, Resolved>; defaultName: string } {
+  const map = new Map<string, Resolved>();
+  const file = env.MSSQL_CONFIG;
+  if (file) {
+    const json = JSON.parse(readFileSync(file, "utf8")) as {
+      default?: string;
+      connections: Record<string, ConnectionSettings>;
+    };
+    for (const [name, s] of Object.entries(json.connections ?? {})) map.set(name, resolve(name, s));
+    if (map.size === 0) throw new Error(`No connections defined in ${file}`);
+    const def = json.default && map.has(json.default) ? json.default : [...map.keys()][0];
+    return { map, defaultName: def };
   }
+  // Single-connection mode (backwards compatible with plain env vars)
+  map.set(
+    "default",
+    resolve("default", {
+      server: env.MSSQL_SERVER,
+      port: env.MSSQL_PORT,
+      instance: env.MSSQL_INSTANCE,
+      database: env.MSSQL_DATABASE,
+      user: env.MSSQL_USER,
+      password: env.MSSQL_PASSWORD,
+      encrypt: env.MSSQL_ENCRYPT,
+      trustServerCertificate: env.MSSQL_TRUST_SERVER_CERTIFICATE,
+      readonly: env.MSSQL_READONLY,
+      maxRows: env.MSSQL_MAX_ROWS,
+      requestTimeout: env.MSSQL_REQUEST_TIMEOUT,
+    })
+  );
+  return { map, defaultName: "default" };
+}
+
+const { map: connections, defaultName } = loadConnections();
+const pools = new Map<string, sql.ConnectionPool>();
+
+function getConn(name?: string): Resolved {
+  const n = name ?? defaultName;
+  const c = connections.get(n);
+  if (!c) {
+    throw new Error(`Unknown connection "${n}". Available: ${[...connections.keys()].join(", ")}`);
+  }
+  return c;
+}
+
+async function getPool(c: Resolved): Promise<sql.ConnectionPool> {
+  const existing = pools.get(c.name);
+  if (existing?.connected) return existing;
+  const pool = await new sql.ConnectionPool(c.config).connect();
+  pools.set(c.name, pool);
   return pool;
 }
+
+// ---------- Helpers ----------
 
 /** Best-effort guard. For real safety, connect with a read-only DB user. */
 function assertReadOnly(query: string) {
@@ -59,24 +148,54 @@ const fail = (e: unknown) => ({
   content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
 });
 
-const server = new McpServer({ name: "mssql-mcp", version: "1.0.0" });
+const connectionParam = z
+  .string()
+  .optional()
+  .describe(`Connection/environment name (default: "${defaultName}"). Use list_connections to see options.`);
 
-server.tool("list_databases", "List databases on the SQL Server instance.", async () => {
-  try {
-    const r = await (await getPool()).request().query("SELECT name FROM sys.databases ORDER BY name");
-    return text(r.recordset.map((x) => x.name));
-  } catch (e) {
-    return fail(e);
+// ---------- Tools ----------
+
+const server = new McpServer({ name: "mssql-mcp", version: "1.1.0" });
+
+server.tool(
+  "list_connections",
+  "List configured SQL Server connections (environments). Passwords are never shown.",
+  async () =>
+    text(
+      [...connections.values()].map((c) => ({
+        name: c.name,
+        isDefault: c.name === defaultName,
+        description: c.description,
+        server: c.config.server,
+        port: c.config.port,
+        database: c.config.database,
+        readonly: c.readonly,
+      }))
+    )
+);
+
+server.tool(
+  "list_databases",
+  "List databases on the SQL Server instance.",
+  { connection: connectionParam },
+  async ({ connection }) => {
+    try {
+      const pool = await getPool(getConn(connection));
+      const r = await pool.request().query("SELECT name FROM sys.databases ORDER BY name");
+      return text(r.recordset.map((x) => x.name));
+    } catch (e) {
+      return fail(e);
+    }
   }
-});
+);
 
 server.tool(
   "list_tables",
   "List tables and views in the current database.",
-  { schema: z.string().optional().describe("Filter by schema name, e.g. dbo") },
-  async ({ schema }) => {
+  { schema: z.string().optional().describe("Filter by schema name, e.g. dbo"), connection: connectionParam },
+  async ({ schema, connection }) => {
     try {
-      const req = (await getPool()).request();
+      const req = (await getPool(getConn(connection))).request();
       let q =
         "SELECT TABLE_SCHEMA AS [schema], TABLE_NAME AS [name], TABLE_TYPE AS [type] FROM INFORMATION_SCHEMA.TABLES";
       if (schema) {
@@ -94,10 +213,10 @@ server.tool(
 server.tool(
   "describe_table",
   "Show columns, types, nullability and primary keys of a table.",
-  { table: z.string().describe("Table name"), schema: z.string().default("dbo") },
-  async ({ table, schema }) => {
+  { table: z.string().describe("Table name"), schema: z.string().default("dbo"), connection: connectionParam },
+  async ({ table, schema, connection }) => {
     try {
-      const req = (await getPool()).request();
+      const req = (await getPool(getConn(connection))).request();
       req.input("t", sql.NVarChar, table);
       req.input("s", sql.NVarChar, schema);
       const r = await req.query(`
@@ -123,20 +242,20 @@ server.tool(
 
 server.tool(
   "query",
-  READONLY
-    ? `Run a read-only T-SQL SELECT query. Results are capped at ${MAX_ROWS} rows.`
-    : "Run a T-SQL query (read/write enabled).",
-  { sql: z.string().describe("T-SQL statement") },
-  async ({ sql: query }) => {
+  "Run a T-SQL query on the chosen connection. Connections in read-only mode accept SELECT only; results are capped at that connection's max rows.",
+  { sql: z.string().describe("T-SQL statement"), connection: connectionParam },
+  async ({ sql: query, connection }) => {
     try {
-      if (READONLY) assertReadOnly(query);
-      const r = await (await getPool()).request().query(query);
+      const c = getConn(connection);
+      if (c.readonly) assertReadOnly(query);
+      const r = await (await getPool(c)).request().query(query);
       const rows = r.recordset ?? [];
       return text({
+        connection: c.name,
         rowCount: rows.length,
-        truncated: rows.length > MAX_ROWS,
+        truncated: rows.length > c.maxRows,
         rowsAffected: r.rowsAffected,
-        rows: rows.slice(0, MAX_ROWS),
+        rows: rows.slice(0, c.maxRows),
       });
     } catch (e) {
       return fail(e);
@@ -145,8 +264,10 @@ server.tool(
 );
 
 await server.connect(new StdioServerTransport());
-console.error(`mssql-mcp ready (readonly=${READONLY}, server=${config.server})`);
+console.error(
+  `mssql-mcp ready (connections: ${[...connections.keys()].join(", ")}; default: ${defaultName})`
+);
 process.on("SIGINT", async () => {
-  await pool?.close();
+  await Promise.all([...pools.values()].map((p) => p.close()));
   process.exit(0);
 });

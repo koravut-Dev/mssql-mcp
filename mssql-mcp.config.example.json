@@ -1,0 +1,33 @@
+{
+  "default": "dev",
+  "connections": {
+    "dev": {
+      "description": "Development database",
+      "server": "dev-sql.example.com",
+      "port": 1433,
+      "database": "MyApp",
+      "user": "dev_user",
+      "password": "${MSSQL_DEV_PASSWORD}",
+      "trustServerCertificate": true,
+      "readonly": false
+    },
+    "uat": {
+      "description": "UAT / staging",
+      "server": "uat-sql.example.com",
+      "database": "MyApp",
+      "user": "uat_reader",
+      "password": "${MSSQL_UAT_PASSWORD}",
+      "trustServerCertificate": true,
+      "readonly": true
+    },
+    "prod": {
+      "description": "Production (read-only)",
+      "server": "prod-sql.example.com",
+      "database": "MyApp",
+      "user": "prod_reader",
+      "password": "${MSSQL_PROD_PASSWORD}",
+      "readonly": true,
+      "maxRows": 200
+    }
+  }
+}
