@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import sql from "mssql";
 import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { z } from "zod";
 
 // ---------- Configuration ----------
@@ -11,6 +12,7 @@ interface ConnectionSettings {
   server?: string;
   port?: number | string;
   instance?: string;
+  serverName?: string;
   database?: string;
   user?: string;
   password?: string;
@@ -59,6 +61,10 @@ function resolve(name: string, raw: ConnectionSettings): Resolved {
         encrypt: bool(c.encrypt, true),
         trustServerCertificate: c.trustServerCertificate !== undefined && String(c.trustServerCertificate).toLowerCase() === "true",
         ...(c.instance ? { instanceName: c.instance } : {}),
+        // TLS refuses an IP address as ServerName; use an explicit name (e.g. the certificate CN) or a placeholder.
+        ...(c.serverName
+          ? { serverName: c.serverName }
+          : isIP(c.server ?? "") ? { serverName: "sqlserver" } : {}),
       },
       pool: { max: 5, min: 0, idleTimeoutMillis: 30000 },
       requestTimeout: Number(c.requestTimeout ?? 30000),
